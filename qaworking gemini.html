@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Knowledge Base Q&A</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        #questionInput { width: 100%; padding: 10px; margin: 10px 0; }
+        button { padding: 10px 20px; background: #4285f4; color: white; border: none; cursor: pointer; }
+        #results { margin-top: 20px; }
+        .result { margin-bottom: 30px; border-bottom: 1px solid #eee; padding-bottom: 20px; }
+        .title { font-weight: bold; color: #2c3e50; font-size: 1.2em; }
+        .content { margin-top: 10px; }
+        .score { color: #666; font-size: 0.9em; }
+    </style>
+</head>
+<body>
+    <h1>Knowledge Base Q&A</h1>
+    
+    <h2>Ask a Question</h2>
+    <input type="text" id="questionInput" placeholder="Enter your question...">
+    <button id="askBtn">Search</button>
+    
+    <div id="results"></div>
+
+    <script>
+        const knowledgeBaseText = `
+      EMBED YOUR KNOWLEDGE BASE HERE
+`.trim();
+
+let documents = [];
+let titles = [];
+let vectorizer = null;
+let docVectors = null;
+let titleVectors = null;
+
+
+const GENAI_API_KEY = "ENTER YOUR API KEY HERE, OR BETTER YET SET UP A BACKEND";
+
+async function giveAnswer(question, context) {
+  try {
+    const { GoogleGenerativeAI } = await import("https://esm.run/@google/generative-ai");
+    const genAI = new GoogleGenerativeAI(GENAI_API_KEY); // Should be handled via backend outside of this proof of concept
+    
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    
+    const prompt = `Context: ${context}\n\nQuestion: ${question}\n\nAnswer clearly using only the provided context, breaking down any steps provided in the context. Provide the answer in plain text.`;
+    
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    return await response.text();
+  } catch (error) {
+    console.error("Error generating content:", error);
+    return "Sorry, I couldn't generate an answer at this time.";
+  }
+}
+
+window.onload = function() {
+    processKnowledgeBase();
+    document.getElementById('askBtn').addEventListener('click', answerQuestion);
+};
+
+function processKnowledgeBase() {
+    if (!knowledgeBaseText) {
+        console.error("knowledgeBaseText is not defined");
+        return;
+    }
+
+    const rawDocs = knowledgeBaseText.split(/\n\s*\n/).filter(doc => doc.trim().length > 0);
+    
+    documents = [];
+    titles = [];
+    
+    rawDocs.forEach(doc => {
+        const lines = doc.split('\n').filter(line => line.trim().length > 0);
+        if (lines.length > 0) {
+            titles.push(lines[0].trim()); 
+            documents.push(lines.slice(1).join('\n').trim()); 
+        }
+    });
+    
+    vectorizer = new TfIdfVectorizer();
+    docVectors = vectorizer.fitTransform(documents);
+    titleVectors = vectorizer.transform(titles);
+}
+
+async function answerQuestion() {
+    const question = document.getElementById('questionInput').value.trim();
+    if (!question) {
+        alert("Please enter a question!");
+        return;
+    }
+    
+    const questionVec = vectorizer.transform([question]);
+    
+    const contentSimilarities = cosineSimilarity(questionVec, docVectors);
+    const titleSimilarities = cosineSimilarity(questionVec, titleVectors);
+    
+    const results = [];
+    for (let i = 0; i < documents.length; i++) {
+        const combinedScore = (titleSimilarities[0][i] * 2 + contentSimilarities[0][i]) / 3;
+        
+        results.push({
+            title: titles[i],
+            document: documents[i],
+            score: combinedScore
+        });
+    }
+    
+    results.sort((a, b) => b.score - a.score);
+    
+    await displayResults(results, question);
+}
+
+async function displayResults(results, question) {
+    const resultsDiv = document.getElementById('results');
+    resultsDiv.innerHTML = '';
+    
+    if (results.length === 0) {
+        resultsDiv.innerHTML = '<p>No results found.</p>';
+        return;
+    }
+    
+    const topResult = results[0];
+    
+    if (topResult.score === 0) {
+        resultsDiv.innerHTML = '<p>No relevant articles found.</p>';
+        return;
+    }
+    
+    const answer = await giveAnswer(question, topResult.document);
+    console.log(answer)
+    
+    function preserveFormatting(answer) {
+  const sanitized = new Option(answer).innerHTML;
+  return sanitized
+    .replace(/\n/g, '<br>')
+    .replace(/  /g, ' &nbsp;')
+    .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>') 
+    .replace(/\*(.*?)\*/g, '<em>$1</em>') 
+    .replace(/`(.*?)`/g, '<code>$1</code>') 
+    .replace(/- (.*?)(<br>|$)/g, '<li>$1</li>') 
+    .replace(/<li>.*?<\/li>/g, match => `<ul>${match}</ul>`);
+}
+    
+    const resultElement = document.createElement('div');
+    resultElement.className = 'result';
+    resultElement.innerHTML = `
+        <div class="title">${topResult.title}</div>
+        <div class="score">Relevance: ${Math.round(topResult.score * 100)}%</div>
+        <div class="content">${topResult.document}</div>
+        <br>
+        <div class="answer"><strong>AI summary:</strong> ${preserveFormatting(answer)}</div>
+    `;
+    resultsDiv.appendChild(resultElement);
+}
+
+class TfIdfVectorizer {
+    constructor() {
+        this.vocabulary = {};
+        this.idf = {};
+        this.vocabSize = 0;
+    }
+    
+    fitTransform(docs) {
+        const df = {}; 
+        const tokenizedDocs = [];
+        
+        docs.forEach(doc => {
+            const tokens = this.tokenize(doc);
+            tokenizedDocs.push(tokens);
+            
+            const uniqueTokens = new Set(tokens);
+            uniqueTokens.forEach(token => {
+                df[token] = (df[token] || 0) + 1;
+            });
+        });
+        
+        this.vocabulary = {};
+        Object.keys(df).sort().forEach(token => {
+            this.vocabulary[token] = Object.keys(this.vocabulary).length;
+        });
+        this.vocabSize = Object.keys(this.vocabulary).length;
+        
+        const N = docs.length;
+        Object.keys(this.vocabulary).forEach(token => {
+            this.idf[token] = Math.log((N + 1) / (df[token] + 1)) + 1;
+        });
+        
+        return tokenizedDocs.map(tokens => this.vectorize(tokens));
+    }
+    
+    transform(docs) {
+        const tokenizedDocs = docs.map(doc => this.tokenize(doc));
+        return tokenizedDocs.map(tokens => this.vectorize(tokens));
+    }
+    
+    tokenize(text) {
+        return text.toLowerCase()
+            .replace(/[^\w\s]/g, ' ')
+            .split(/\s+/)
+            .filter(token => token.length > 0);
+    }
+    
+    vectorize(tokens) {
+        const tf = {};
+        tokens.forEach(token => {
+            if (this.vocabulary.hasOwnProperty(token)) {
+                tf[token] = (tf[token] || 0) + 1;
+            }
+        });
+        
+        const vector = new Array(this.vocabSize).fill(0);
+        Object.keys(tf).forEach(token => {
+            const index = this.vocabulary[token];
+            vector[index] = tf[token] * this.idf[token];
+        });
+        
+        return vector;
+    }
+}
+
+function cosineSimilarity(vecA, vecB) {
+    const result = Array(vecA.length).fill().map(() => Array(vecB.length).fill(0));
+    
+    for (let i = 0; i < vecA.length; i++) {
+        for (let j = 0; j < vecB.length; j++) {
+            const a = vecA[i];
+            const b = vecB[j];
+            
+            let dotProduct = 0;
+            let normA = 0;
+            let normB = 0;
+            
+            for (let k = 0; k < a.length; k++) {
+                dotProduct += a[k] * b[k];
+                normA += a[k] ** 2;
+                normB += b[k] ** 2;
+            }
+            
+            if (normA > 0 && normB > 0) {
+                result[i][j] = dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
+            }
+        }
+    }
+    
+    return result;
+}
+    </script>
+</body>
+</html>
